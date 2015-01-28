@@ -19,10 +19,16 @@ package org.springframework.rx.web.servlet;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.ByteBuffer;
+import java.util.Arrays;
+import java.util.Queue;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.atomic.AtomicBoolean;
 import javax.servlet.AsyncContext;
 import javax.servlet.ReadListener;
 import javax.servlet.ServletException;
 import javax.servlet.ServletInputStream;
+import javax.servlet.ServletOutputStream;
+import javax.servlet.WriteListener;
 import javax.servlet.annotation.WebServlet;
 import javax.servlet.http.HttpServlet;
 import javax.servlet.http.HttpServletRequest;
@@ -30,13 +36,14 @@ import javax.servlet.http.HttpServletResponse;
 
 import org.reactivestreams.Publisher;
 import org.reactivestreams.Subscriber;
+import org.reactivestreams.Subscription;
 import reactor.rx.Streams;
 import reactor.rx.stream.Broadcaster;
 
 import org.springframework.http.HttpMessage;
 import org.springframework.http.PublishingHttpRequest;
 import org.springframework.http.server.ServletServerHttpRequest;
-import org.springframework.rx.web.demo.MessageSubscriber;
+import org.springframework.rx.web.demo.EchoProcessor;
 
 /**
  * @author Arjen Poutsma
@@ -50,13 +57,16 @@ public class HttpMessagePublisherServlet extends HttpServlet {
 
 	private final Broadcaster<HttpMessage> messagePublisher = Streams.broadcast();
 
+	private EchoProcessor processor;
+
 	public void setMaxByteBufferSize(int maxByteBufferSize) {
 		this.maxByteBufferSize = maxByteBufferSize;
 	}
 
 	@Override
 	public void init() throws ServletException {
-		messagePublisher.subscribe(new MessageSubscriber());
+		processor = new EchoProcessor();
+		messagePublisher.subscribe(processor);
 	}
 
 	@Override
@@ -64,11 +74,17 @@ public class HttpMessagePublisherServlet extends HttpServlet {
 			throws ServletException, IOException {
 
 		AsyncContext context = request.startAsync(request, response);
+		AsyncContextSynchronizer contextWrapper = new AsyncContextSynchronizer(context);
 
-		PublishingListener listener = new PublishingListener(context, maxByteBufferSize);
-		request.getInputStream().setReadListener(listener);
+		PublishingListener readListener = new PublishingListener(contextWrapper, maxByteBufferSize);
+		request.getInputStream().setReadListener(readListener);
 
-		this.messagePublisher.onNext(new ServletPublishingHttpRequest(request, listener));
+		SubscribingListener writeListener = new SubscribingListener(contextWrapper);
+		response.getOutputStream().setWriteListener(writeListener);
+
+		processor.subscribe(writeListener);
+
+		this.messagePublisher.onNext(new ServletPublishingHttpRequest(request, readListener));
 	}
 
 	@Override
@@ -103,20 +119,20 @@ public class HttpMessagePublisherServlet extends HttpServlet {
 
 		private static final int BUFFER_SIZE = 4096;
 
-		private final Broadcaster<ByteBuffer> byteBufferPublisher = Streams.broadcast();
-
 		private final byte[] buffer = new byte[BUFFER_SIZE];
 
-		private final AsyncContext asyncContext;
+		private final Broadcaster<ByteBuffer> byteBufferPublisher = Streams.broadcast();
+
+		private final AsyncContextSynchronizer synchronizer;
 
 		private final ServletInputStream input;
 
 		private final ByteBuffer byteBuffer;
 
-		public PublishingListener(AsyncContext asyncContext, int byteBufferCapacity)
+		public PublishingListener(AsyncContextSynchronizer synchronizer, int byteBufferCapacity)
 				throws IOException {
-			this.asyncContext = asyncContext;
-			this.input = asyncContext.getRequest().getInputStream();
+			this.synchronizer = synchronizer;
+			this.input = this.synchronizer.getInputStream();
 			this.byteBuffer = ByteBuffer.allocate(byteBufferCapacity);
 		}
 
@@ -150,8 +166,8 @@ public class HttpMessagePublisherServlet extends HttpServlet {
 
 		@Override
 		public void onAllDataRead() throws IOException {
+			this.synchronizer.readComplete();
 			this.byteBufferPublisher.onComplete();
-			this.asyncContext.complete();
 		}
 
 		@Override
@@ -162,6 +178,68 @@ public class HttpMessagePublisherServlet extends HttpServlet {
 		@Override
 		public void subscribe(Subscriber<? super ByteBuffer> s) {
 			this.byteBufferPublisher.subscribe(s);
+		}
+	}
+
+	private static class SubscribingListener
+			implements WriteListener, Subscriber<ByteBuffer> {
+
+		private static final int BUFFER_SIZE = 4096;
+
+		private final byte[] buffer = new byte[BUFFER_SIZE];
+
+		private Queue<byte[]> queue = new LinkedBlockingQueue<>();
+
+		private final AsyncContextSynchronizer synchronizer;
+
+		private final ServletOutputStream output;
+
+		private Subscription subscription;
+
+		private AtomicBoolean subscriptionComplete = new AtomicBoolean(false);
+
+		public SubscribingListener(AsyncContextSynchronizer synchronizer)
+				throws IOException {
+			this.synchronizer = synchronizer;
+			this.output = this.synchronizer.getOutputStream();
+		}
+
+		@Override
+		public void onSubscribe(Subscription s) {
+			this.subscription = s;
+			this.subscription.request(1);
+		}
+
+		@Override
+		public void onNext(ByteBuffer byteBuffer) {
+			while (byteBuffer.remaining() > 0) {
+				int len = Math.min(BUFFER_SIZE, byteBuffer.remaining());
+				byteBuffer.get(this.buffer, 0, len);
+
+				queue.add(Arrays.copyOf(this.buffer, len));
+			}
+			this.subscription.request(1);
+		}
+
+		@Override
+		public void onComplete() {
+			subscriptionComplete.compareAndSet(false, true);
+		}
+
+		@Override
+		public void onError(Throwable t) {
+			t.printStackTrace();
+			this.synchronizer.writeComplete();
+		}
+
+		@Override
+		public void onWritePossible() throws IOException {
+			while (!queue.isEmpty() && output.isReady()) {
+				output.write(queue.poll());
+			}
+			if (queue.isEmpty() && subscriptionComplete.get()) {
+				this.synchronizer.writeComplete();
+			}
 		}
 	}
 
