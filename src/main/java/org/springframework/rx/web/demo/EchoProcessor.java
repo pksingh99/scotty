@@ -17,6 +17,7 @@
 package org.springframework.rx.web.demo;
 
 import java.nio.ByteBuffer;
+import java.util.Arrays;
 
 import org.reactivestreams.Processor;
 import org.reactivestreams.Subscriber;
@@ -54,17 +55,19 @@ public class EchoProcessor implements Processor<HttpMessage, ByteBuffer> {
 				@Override
 				public void onSubscribe(Subscription subscription) {
 					this.subscription = subscription;
-					byteBufferPublisher.onSubscribe(subscription);
+//					byteBufferPublisher.onSubscribe(subscription);
 					this.subscription.request(1);
 				}
 
 				@Override
 				public void onNext(ByteBuffer byteBuffer) {
-					totalLen += byteBuffer.remaining();
-//					byte[] bytes = new byte[byteBuffer.remaining()];
-//					byteBuffer.get(bytes);
-//					ByteBuffer copy = ByteBuffer.wrap(bytes);
-					byteBufferPublisher.onNext(byteBuffer);
+					int len = byteBuffer.remaining();
+					totalLen += len;
+					byte[] bytes = new byte[len];
+					byteBuffer.get(bytes);
+					ByteBuffer copy = ByteBuffer.wrap(Arrays.copyOf(bytes, len));
+//					System.out.println("Sending " + len + " bytes");
+					byteBufferPublisher.onNext(copy);
 
 					this.subscription.request(1);
 				}
@@ -77,7 +80,7 @@ public class EchoProcessor implements Processor<HttpMessage, ByteBuffer> {
 
 				@Override
 				public void onComplete() {
-					System.out.println("Total read EchoProcessor: " + totalLen);
+//					System.out.println("Total read EchoProcessor: " + totalLen);
 					byteBufferPublisher.onComplete();
 
 				}

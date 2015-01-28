@@ -84,7 +84,8 @@ public class HttpMessagePublisherServlet extends HttpServlet {
 
 		processor.subscribe(writeListener);
 
-		this.messagePublisher.onNext(new ServletPublishingHttpRequest(request, readListener));
+		this.messagePublisher.onNext(
+				new ServletPublishingHttpRequest(request, readListener));
 	}
 
 	@Override
@@ -205,9 +206,8 @@ public class HttpMessagePublisherServlet extends HttpServlet {
 		}
 
 		@Override
-		public void onSubscribe(Subscription s) {
-			this.subscription = s;
-			this.subscription.request(1);
+		public void onSubscribe(Subscription subscription) {
+			this.subscription = subscription;
 		}
 
 		@Override
@@ -218,7 +218,6 @@ public class HttpMessagePublisherServlet extends HttpServlet {
 
 				queue.add(Arrays.copyOf(this.buffer, len));
 			}
-			this.subscription.request(1);
 		}
 
 		@Override
@@ -234,10 +233,14 @@ public class HttpMessagePublisherServlet extends HttpServlet {
 
 		@Override
 		public void onWritePossible() throws IOException {
-			while (!queue.isEmpty() && output.isReady()) {
+			if (this.subscription != null && this.output.isReady() && !this.subscriptionComplete.get()) {
+				this.subscription.request(1);
+			}
+
+			while (!this.queue.isEmpty() && this.output.isReady()) {
 				output.write(queue.poll());
 			}
-			if (queue.isEmpty() && subscriptionComplete.get()) {
+			if (this.queue.isEmpty() && this.subscriptionComplete.get()) {
 				this.synchronizer.writeComplete();
 			}
 		}
